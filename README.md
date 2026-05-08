@@ -6,6 +6,8 @@ Three approaches to automatically labeling video content with [IAB Content Taxon
 
 ## Background
 
+Before running any pipeline, the IAB Content Taxonomy 3.1 TSV is loaded once into a local SQLite DB (`iab_taxonomy_3.1.db`) using `setup_taxonomy.py`. All pipelines read from this DB at runtime to resolve matched nodes into their full T1–T4 hierarchy.
+
 All three pipelines share a common first step: **Pegasus 1.5 async segmentation**, which splits the video into scenes and generates a 2–3 sentence visual description per scene. Consecutive scenes flagged as continuations are merged; scenes shorter than 30 seconds are absorbed into neighbors.
 
 **Segmentation prompt (shared):**
@@ -112,18 +114,6 @@ Return ONLY JSON: {"scene":"...","keywords":["...",...]}
 
 Category: {breadcrumb}
 ```
-
----
-
-## Results
-
-| | P1 (Haiku Direct) | P2 (Pegasus Breadcrumbs) | P3 (Embeddings) |
-|---|---|---|---|
-| **Models** | Pegasus + Claude Haiku | Pegasus only | Pegasus + Claude Haiku (setup) + Marengo |
-| **Accuracy (human eval)** | 11/13 ✅ | 6/13 | 11/13 ✅ |
-| **Avg confidence gap** | ~15 | ~39.7 | ~0.029 (cosine Δ) |
-
-P1 and P3 tied for best accuracy in human eval (11/13 correct). P1 produced the most nuanced per-scene labels. P3 requires no LLM at inference time, making it fastest and cheapest to run at scale.
 
 ---
 

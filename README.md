@@ -6,7 +6,7 @@ Three approaches to automatically labeling video content with [IAB Content Taxon
 
 ## Background
 
-All three pipelines share a common first step: **Pegasus 1.5 async segmentation**, which splits the video into scenes and generates a 2–3 sentence visual description per scene. Consecutive scenes flagged as continuations are merged; scenes shorter than 30 seconds are absorbed into neighbors. This runs once per video and is cached — all pipelines work from the same scene boundaries via `segmentation.py`.
+All three pipelines share a common first step: **Pegasus 1.5 async segmentation**, which splits the video into scenes and generates a 2–3 sentence visual description per scene. Consecutive scenes flagged as continuations are merged; scenes shorter than 30 seconds are absorbed into neighbors.
 
 **Segmentation prompt (shared):**
 ```
@@ -18,6 +18,8 @@ topic or activity as the previous segment. Only set to False if the content
 changes entirely. Minor changes in camera angle, speaker, or location within
 the same topic should remain True."
 ```
+
+Each classified scene returns a `first_choice` (top IAB breadcrumb), `first_confidence` (0–100), `second_choice` (next best match), `second_confidence`, and `confidence_gap` (first minus second). A high gap means the model was decisive; a gap near 0 means it was uncertain between two options.
 
 ---
 

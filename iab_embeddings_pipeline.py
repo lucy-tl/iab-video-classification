@@ -2,12 +2,16 @@
 P3 — Embedding Similarity
 =========================
 One-time setup: Claude Haiku enriches each of the 704 IAB taxonomy nodes with a
-visual scene description and 20 keywords. TwelveLabs Marengo embeds the enriched
-text and saves to taxonomy_embeds.json.
+visual scene description and 20 keywords. TwelveLabs Marengo text-embeds the
+enriched descriptions and saves them to taxonomy_embeds.json.
 
-Per video: Pegasus generates scene descriptions. Each description is embedded with
-Marengo and matched to the closest taxonomy node via cosine similarity. No LLM
-calls at classification time.
+Per video: Pegasus segments the video into scenes (timestamps only). The video's
+pre-computed Marengo visual embeddings are retrieved from the index — these are
+~5-second clip embeddings generated when the video was indexed. For each Pegasus
+scene, all Marengo segments that overlap the scene's time range are averaged into
+a single embedding, then matched to the closest taxonomy node via cosine
+similarity. This keeps the classification entirely in the visual domain end-to-end,
+skipping the intermediate Pegasus text description step.
 
 Prerequisite: run setup_taxonomy.py once to load the taxonomy into SQLite.
 
@@ -15,7 +19,7 @@ Setup (one-time, after taxonomy is loaded):
     python3 iab_embeddings_pipeline.py --setup
 
 Usage:
-    python3 iab_embeddings_pipeline.py --video <ASSET_ID>
+    python3 iab_embeddings_pipeline.py --video <ASSET_ID> --index-id <INDEX_ID>
     python3 iab_embeddings_pipeline.py --index <INDEX_ID>
     python3 iab_embeddings_pipeline.py --inspect   # verify taxonomy_embeds.json
 
@@ -31,7 +35,6 @@ import sqlite3
 import json
 import os
 import math
-import time
 import argparse
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -76,10 +79,7 @@ def resolve_all_tiers(best_match_id: str, cache: dict) -> dict:
 # ─────────────────────────────────────────────
 
 def enrich_node_with_haiku(node: dict, haiku_client: anthropic.Anthropic) -> str:
-    """
-    Enrich a taxonomy node with a visual scene description + 20 keywords using Haiku.
-    The enriched text is later embedded so it matches the style of Pegasus scene descriptions.
-    """
+    """Enrich a taxonomy node with a visual scene description + 20 keywords using Haiku."""
     breadcrumb = node.get("full_path") or node.get("name", "")
 
     prompt = f"""You are helping build a video content classification system.
@@ -129,9 +129,37 @@ Category: {breadcrumb}"""
 
 
 def get_text_embedding(text: str, tl_client: TwelveLabs) -> list:
-    """Embed a text string using TwelveLabs Marengo. Returns the float vector."""
+    """Embed a text string using Marengo. Returns the float vector."""
     resp = tl_client.embed.create(model_name="marengo3.0", text=text)
     return resp.text_embedding.segments[0].float_
+
+
+def get_indexed_visual_embeddings(asset_id: str, index_id: str, tl_client: TwelveLabs) -> list:
+    """
+    Retrieve pre-computed Marengo visual embeddings for an indexed video.
+    Returns a list of segment objects each with start_offset_sec, end_offset_sec, float_.
+    """
+    result = tl_client.indexes.videos.retrieve(index_id, asset_id, embedding_option="visual")
+    return result.embedding.video_embedding.segments
+
+
+def aggregate_scene_embedding(scene_start: float, scene_end: float, indexed_segments: list) -> list:
+    """
+    Average all Marengo segments that overlap the Pegasus scene's time range.
+    Falls back to the temporally closest segment if none overlap.
+    """
+    overlapping = [
+        s.float_ for s in indexed_segments
+        if s.start_offset_sec < scene_end and s.end_offset_sec > scene_start
+    ]
+    if not overlapping:
+        closest = min(
+            indexed_segments,
+            key=lambda s: abs((s.start_offset_sec + s.end_offset_sec) / 2 - (scene_start + scene_end) / 2)
+        )
+        return closest.float_
+    n = len(overlapping)
+    return [sum(v[i] for v in overlapping) / n for i in range(len(overlapping[0]))]
 
 
 def build_taxonomy_embeds(
@@ -259,11 +287,9 @@ def find_best_match(scene_embedding: list, embed_db: list) -> Optional[dict]:
 # CLASSIFICATION
 # ─────────────────────────────────────────────
 
-def classify_scene(scene: dict, embed_db: list, cache: dict, tl_client: TwelveLabs) -> dict:
-    """Embed a scene description and find the closest taxonomy match via cosine similarity."""
-    description = scene["scene_description"]
-
-    embedding = get_text_embedding(description, tl_client)
+def classify_scene(scene: dict, embed_db: list, cache: dict, indexed_segments: list) -> dict:
+    """Aggregate indexed Marengo visual embeddings for a scene and find the closest taxonomy match."""
+    embedding = aggregate_scene_embedding(scene["start"], scene["end"], indexed_segments)
     match     = find_best_match(embedding, embed_db)
 
     if not match:
@@ -275,18 +301,16 @@ def classify_scene(scene: dict, embed_db: list, cache: dict, tl_client: TwelveLa
     second_tiers   = resolve_all_tiers(second_iab_id, cache) if second_iab_id else {}
     confidence_gap = round(match.get("score", 0) - match.get("second_score", 0), 4)
 
-    # Note: confidence scores are cosine similarity floats (0.0–1.0), not multiplied by 100
     return {
-        "scene_description":  description,
-        "first_choice":       match.get("breadcrumb", ""),
-        "first_confidence":   round(match.get("score", 0), 4),
-        "second_choice":      match.get("second_name", ""),
-        "second_confidence":  round(match.get("second_score", 0), 4),
-        "confidence_gap":     confidence_gap,
-        "tier1":  tiers[1],
-        "tier2":  tiers[2],
-        "tier3":  tiers[3],
-        "tier4":  tiers[4],
+        "first_choice":      match.get("breadcrumb", ""),
+        "first_confidence":  round(match.get("score", 0), 4),
+        "second_choice":     match.get("second_name", ""),
+        "second_confidence": round(match.get("second_score", 0), 4),
+        "confidence_gap":    confidence_gap,
+        "tier1": tiers[1],
+        "tier2": tiers[2],
+        "tier3": tiers[3],
+        "tier4": tiers[4],
     }
 
 
@@ -300,17 +324,18 @@ def format_time(seconds):
     return f"{m}:{s:02d}"
 
 
-def _run_single_video(asset_id: str, tl_client: TwelveLabs, cache: dict, embed_db: list) -> list:
+def _run_single_video(asset_id: str, index_id: str, tl_client: TwelveLabs, cache: dict, embed_db: list) -> list:
     """Run the embedding pipeline for one video."""
 
     print(f"\nAnalyzing video {asset_id}...")
-    scenes = get_or_run_scenes(asset_id, tl_client)
-    print(f"  {len(scenes)} scenes — classifying...")
+    scenes           = get_or_run_scenes(asset_id, tl_client)
+    indexed_segments = get_indexed_visual_embeddings(asset_id, index_id, tl_client)
+    print(f"  {len(scenes)} scenes, {len(indexed_segments)} Marengo segments — matching embeddings...")
 
     results_map = {}
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {
-            executor.submit(classify_scene, scene, embed_db, cache, tl_client): i
+            executor.submit(classify_scene, scene, embed_db, cache, indexed_segments): i
             for i, scene in enumerate(scenes)
         }
         for future in as_completed(futures):
@@ -398,16 +423,19 @@ def save_results_json(asset_id: str, results: list):
     print(f"  💾 Saved to {path}")
 
 
-def analyze_video(asset_id: str, db_path: str = DB_PATH, embed_db_path: str = EMBED_DB_PATH):
+def analyze_video(asset_id: str, index_id: str, db_path: str = DB_PATH, embed_db_path: str = EMBED_DB_PATH):
     """Run the pipeline on a single video asset."""
     if not asset_id or not asset_id.strip():
         print("❌ No video ID provided.")
+        return None
+    if not index_id or not index_id.strip():
+        print("❌ No index ID provided. Use --index-id <INDEX_ID>.")
         return None
     clients = _init_clients(db_path, embed_db_path)
     if not clients:
         return None
     tl_client, _, cache, embed_db = clients
-    results = _run_single_video(asset_id, tl_client, cache, embed_db)
+    results = _run_single_video(asset_id, index_id, tl_client, cache, embed_db)
     if results:
         save_results_json(asset_id, results)
     return results
@@ -427,7 +455,7 @@ def analyze_index(index_id: str, db_path: str = DB_PATH, embed_db_path: str = EM
     for video in videos:
         asset_id = video.id
         try:
-            results = _run_single_video(asset_id, tl_client, cache, embed_db)
+            results = _run_single_video(asset_id, index_id, tl_client, cache, embed_db)
             all_results[asset_id] = results
             if results:
                 save_results_json(asset_id, results)
@@ -487,13 +515,14 @@ def inspect_embeds(embed_db_path: str = EMBED_DB_PATH):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="P3 — Embedding Similarity: IAB 3.1 classification via Marengo cosine search")
-    parser.add_argument("--setup",   action="store_true", help="One-time: enrich taxonomy with Haiku + embed with TwelveLabs")
-    parser.add_argument("--force",   action="store_true", help="With --setup: regenerate all embeddings even if they exist")
-    parser.add_argument("--inspect", action="store_true", help="Print taxonomy_embeds.json stats")
-    parser.add_argument("--video",   metavar="ASSET_ID",  help="Analyze a single video")
-    parser.add_argument("--index",   metavar="INDEX_ID",  help="Analyze all videos in an index")
-    parser.add_argument("--db",      default=DB_PATH,     help=f"SQLite DB path (default: {DB_PATH})")
-    parser.add_argument("--embeds",  default=EMBED_DB_PATH, help=f"Embeddings JSON path (default: {EMBED_DB_PATH})")
+    parser.add_argument("--setup",    action="store_true", help="One-time: enrich taxonomy with Haiku + embed with TwelveLabs")
+    parser.add_argument("--force",    action="store_true", help="With --setup: regenerate all embeddings even if they exist")
+    parser.add_argument("--inspect",  action="store_true", help="Print taxonomy_embeds.json stats")
+    parser.add_argument("--video",    metavar="ASSET_ID",  help="Analyze a single video")
+    parser.add_argument("--index-id", metavar="INDEX_ID",  help="Index containing the --video asset (required with --video)")
+    parser.add_argument("--index",    metavar="INDEX_ID",  help="Analyze all videos in an index")
+    parser.add_argument("--db",       default=DB_PATH,     help=f"SQLite DB path (default: {DB_PATH})")
+    parser.add_argument("--embeds",   default=EMBED_DB_PATH, help=f"Embeddings JSON path (default: {EMBED_DB_PATH})")
     args = parser.parse_args()
 
     if args.setup:
@@ -512,7 +541,7 @@ if __name__ == "__main__":
         inspect_embeds(args.embeds)
 
     if args.video:
-        analyze_video(args.video, args.db, args.embeds)
+        analyze_video(args.video, getattr(args, "index_id", None), args.db, args.embeds)
 
     if args.index:
         analyze_index(args.index, args.db, args.embeds)

@@ -94,14 +94,15 @@ your second-best choice, and its confidence.
 
 **One-time setup:**
 1. Haiku enriches each of the 704 taxonomy nodes → visual scene description + 20 keywords
-2. Marengo 3.0 embeds the enriched text → saved to `taxonomy_embeds.json`
+2. Marengo 3.0 text-embeds the enriched descriptions → saved to `taxonomy_embeds.json`
 
 **Per video:**
-1. Pegasus async → scene descriptions
-2. Marengo 3.0 embeds each scene description
-3. Cosine similarity against all 704 node embeddings → top match → T1–T4
+1. Pegasus async → scene timestamps
+2. Retrieve pre-computed Marengo visual embeddings from the index (generated at index time, ~5-second clip segments)
+3. For each Pegasus scene, average all overlapping Marengo segments → scene embedding
+4. Cosine similarity against all 704 taxonomy node embeddings → top match → T1–T4
 
-No LLM calls at classification time — just vector math.
+No LLM calls at classification time — just vector math. The video must be in a Marengo-enabled index for visual embeddings to be available.
 
 **Haiku enrichment prompt (one-time, per taxonomy node):**
 ```
@@ -153,8 +154,9 @@ python3 iab_embeddings_pipeline.py --setup
 ```bash
 python3 iab_haiku_pipeline.py --video <ASSET_ID>
 python3 iab_breadcrumbs_pipeline.py --video <ASSET_ID>
-python3 iab_embeddings_pipeline.py --video <ASSET_ID>
+python3 iab_embeddings_pipeline.py --video <ASSET_ID> --index-id <INDEX_ID>
 
 # or run on a full index
 python3 iab_haiku_pipeline.py --index <INDEX_ID>
+python3 iab_embeddings_pipeline.py --index <INDEX_ID>
 ```

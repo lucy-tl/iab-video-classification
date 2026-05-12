@@ -27,27 +27,7 @@ Each classified scene returns a `first_choice` (top IAB breadcrumb), `first_conf
 
 ## Why Claude Haiku?
 
-No LLM is meaningfully better than others at native IAB classification. The closest study ([arXiv:2510.13885](https://arxiv.org/abs/2510.13885), Oct 2025) tested 10 LLMs zero-shot on IAB 2.2 (690 categories, structurally similar to 3.1):
-
-| Model | F1 | Accuracy |
-|---|---|---|
-| Claude 3.5 Sonnet | 0.55 | 0.52 |
-| GPT OSS-120B | 0.53 | 0.55 |
-| Gemini 2.0 Flash | 0.52 | 0.54 |
-| DeepSeek | 0.52 | 0.51 |
-| LLaMA 3.3 70B | 0.51 | 0.43 |
-
-Top models are within ~0.03 F1 of each other. We use **Claude Haiku** (fastest, cheapest Claude tier) since the task is constrained classification, not open-ended generation.
-
-Critically, **Claude is the only provider that can fit the full 704-node taxonomy in a single call:**
-
-| Provider | Mechanism | Max enum values |
-|---|---|---|
-| Anthropic Claude | `tool_use` → `input_schema.enum` | ~17,500 tokens confirmed |
-| OpenAI GPT-4o/4.1 | `response_format: json_schema` | **500 values (hard limit)** |
-| Google Gemini | `response_schema` | **~120 values (causes HTTP 500 above)** |
-
-OpenAI can't fit the full taxonomy in one shot. Gemini can't either. Claude handles all 704 nodes in a single call.
+IAB classification is constrained selection, not open-ended generation — model quality differences matter less than cost and speed. We use **Claude Haiku** (fastest, cheapest Claude tier) because it handles the full 704-node taxonomy in a single structured call.
 
 ---
 
@@ -98,7 +78,7 @@ your second-best choice, and its confidence.
 
 **Per video:**
 1. Pegasus async → scene timestamps
-2. Retrieve pre-computed Marengo visual embeddings from the index (generated at index time, ~5-second clip segments)
+2. Retrieve pre-computed Marengo visual embeddings from the index (generated at index time, variable-length clip segments typically 4–8 seconds)
 3. For each Pegasus scene, average all overlapping Marengo segments → scene embedding
 4. Cosine similarity against all 704 taxonomy node embeddings → top match → T1–T4
 
@@ -115,6 +95,22 @@ Return ONLY JSON: {"scene":"...","keywords":["...",...]}
 
 Category: {breadcrumb}
 ```
+
+---
+
+## LLM IAB Classification Benchmark
+
+The closest published study ([arXiv:2510.13885](https://arxiv.org/abs/2510.13885), Oct 2025) tested 10 LLMs zero-shot on IAB 2.2 (690 categories, structurally similar to 3.1):
+
+| Model | F1 | Accuracy |
+|---|---|---|
+| Claude 3.5 Sonnet | 0.55 | 0.52 |
+| GPT OSS-120B | 0.53 | 0.55 |
+| Gemini 2.0 Flash | 0.52 | 0.54 |
+| DeepSeek | 0.52 | 0.51 |
+| LLaMA 3.3 70B | 0.51 | 0.43 |
+
+Top models are within ~0.03 F1 of each other. Claude 3.5 Sonnet leads slightly, but the gap is small enough that cost/speed is the deciding factor for a constrained classification task like this.
 
 ---
 
